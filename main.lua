@@ -14,9 +14,10 @@ local debug_show_shadow_map = false   -- Enable to view shadow map in overlap
 local modelHeightOffset = -0.45    -- Adjust this to move player models up (+) or down (-)
 local npcModelHeightOffset = -0.45 -- Separate height offset for NPCs (they need different positioning)
 local cameraHeightOffset = 0.37
-local playerNPCSpeed = 120000
-local npcSpeedLimit = 15
-local playerJumpForce = 100000
+local playerSpeed = 150            -- Player movement force multiplier (adjusted for 70kg mass)
+local npcSpeed = 50                -- NPC movement force multiplier (increased for 70kg mass)
+local npcSpeedLimit = 5            -- NPC maximum speed limit
+local playerJumpForce = 800
 
 -- Physics parameters
 -- Physics collider dimensions for boxes
@@ -25,10 +26,10 @@ local boxColliderHeight = 1.0 -- Height of the box collider (Y-axis)
 local boxColliderDepth = 0.4  -- Depth of the box collider (Z-axis)
 
 -- Mass configuration for players and NPCs
-local playerNPCMass = 10000 -- Heavy mass for both players and NPCs (kg)
+local playerNPCMass = 70 -- Realistic human mass (kg)
 
 -- Inertia configuration for realistic gravity response
--- Higher inertia values make objects resist rotational changes more (more realistic for heavy characters)
+-- Higher inertia values make objects resist rotational changes more (more realistic for characters)
 local playerNPCInertia = {
   -- Diagonal elements (Ixx, Iyy, Izz) - main rotational resistance around each axis
   playerNPCMass * 0.4, -- X-axis rotation resistance (forward/backward tumbling)
@@ -38,9 +39,9 @@ local playerNPCInertia = {
   0, 0, 0
 }
 
--- Global spawn height configuration (TerrainCollider bug workaround)
--- Spawn above visual terrain and let gravity pull objects to the collision surface
-local spawnHeightOffset = 20 -- Units above visual terrain height
+-- Global spawn height configuration
+-- All players and NPCs now spawn at least 1 meter above terrain using getSafeSpawnHeight()
+-- This ensures no entities spawn underground or get stuck in terrain
 
 -- Shadow mapping parameters (optimized for houses but used for all objects)
 local shadow_near_plane = 0.01 -- How close shadows start to the light
@@ -274,15 +275,16 @@ function MultiplayerENetClient:processMessage(message)
       self.playerId = parts[3]
       print("Assigned player ID: " .. self.playerId)
     else
-      -- Create physics collider for the other player
-      local playerCollider = world:newBoxCollider(0, 5 + boxColliderHeight / 2, 0, boxColliderWidth, boxColliderHeight,
+      -- Create physics collider for the other player at safe spawn height
+      local safeSpawnHeight = getSafeSpawnHeight(0, 0)
+      local playerCollider = world:newBoxCollider(0, safeSpawnHeight, 0, boxColliderWidth, boxColliderHeight,
         boxColliderDepth)
       -- Box colliders are naturally vertical (Y-axis aligned), no rotation needed
       -- Set properties for realistic player physics
-      playerCollider:setLinearDamping(5.0)   -- Same damping as local player
-      playerCollider:setAngularDamping(10.0) -- Prevent spinning
-      playerCollider:setFriction(1.0)        -- High friction to reduce sliding
-      playerCollider:setRestitution(0.6)     -- Bouncy for fun physics
+      playerCollider:setLinearDamping(1.0)  -- Same damping as local player (fixed)
+      playerCollider:setAngularDamping(5.0) -- Prevent spinning (fixed)
+      playerCollider:setFriction(1.0)       -- High friction to reduce sliding
+      playerCollider:setRestitution(0.6)    -- Bouncy for fun physics
 
       -- Set heavy mass and realistic inertia for better gravity response (same as local player)
       playerCollider:setMass(playerNPCMass)
@@ -297,11 +299,11 @@ function MultiplayerENetClient:processMessage(message)
 
       self.players[playerId] = {
         id = playerId,
-        position = lovr.math.newVec3(0, 5.5, 0), -- Match the collider starting position (5m + half collider height)
-        yaw = 0,                                 -- Store yaw directly instead of quaternion
-        isMoving = false,                        -- Track if player is moving for animation
+        position = lovr.math.newVec3(0, safeSpawnHeight, 0), -- Match the collider starting position
+        yaw = 0,                                             -- Store yaw directly instead of quaternion
+        isMoving = false,                                    -- Track if player is moving for animation
         lastUpdate = lovr.timer.getTime(),
-        collider = playerCollider                -- Store the physics collider
+        collider = playerCollider                            -- Store the physics collider
       }
 
       -- No ghost colliders needed - clients will send push messages directly
@@ -421,14 +423,15 @@ function MultiplayerENetClient:processMessage(message)
 
       -- Update or create NPC data (with physics bodies on clients)
       if not self.npcsFromHost[npcId] then
-        -- Create physics body for NPC on client (positioned so bottom sits on terrain at Y=0)
-        local npcBody = world:newBoxCollider(posData[1] or 0, 5 + boxColliderHeight / 2, posData[3] or 0,
+        -- Create physics body for NPC on client at safe spawn height
+        local npcSafeHeight = getSafeSpawnHeight(posData[1] or 0, posData[3] or 0)
+        local npcBody = world:newBoxCollider(posData[1] or 0, npcSafeHeight, posData[3] or 0,
           boxColliderWidth, boxColliderHeight, boxColliderDepth)
         -- Box colliders are naturally vertical (Y-axis aligned), no rotation needed
-        npcBody:setLinearDamping(2.0)   -- Same damping as host
-        npcBody:setAngularDamping(15.0) -- Same damping as host
-        npcBody:setFriction(0.3)        -- Same friction as host
-        npcBody:setRestitution(0.6)     -- Bouncy for fun physics
+        npcBody:setLinearDamping(1.0)  -- Same damping as host (fixed)
+        npcBody:setAngularDamping(5.0) -- Same damping as host (fixed)
+        npcBody:setFriction(0.3)       -- Same friction as host
+        npcBody:setRestitution(0.6)    -- Bouncy for fun physics
 
         -- Set heavy mass and realistic inertia for better gravity response (same as host NPCs)
         npcBody:setMass(playerNPCMass)
@@ -444,7 +447,7 @@ function MultiplayerENetClient:processMessage(message)
         self.npcsFromHost[npcId] = {
           id = npcId,
           body = npcBody,
-          position = lovr.math.newVec3(posData[1] or 0, posData[2] or 0, posData[3] or 0),
+          position = lovr.math.newVec3(posData[1] or 0, npcSafeHeight, posData[3] or 0),
           yaw = yaw,
           state = state,
           color = colorData,
@@ -958,39 +961,58 @@ function MultiplayerENetServer:pingClients()
 end
 
 -- ============================================================================
--- TERRAIN SYSTEM USING LOVR'S TERRAINSHAPE
+-- INFINITE TERRAIN TILE SYSTEM
 -- ============================================================================
 
--- Terrain configuration
-local terrainSize = 2000         -- Size of the terrain (2000x2000 units)
-local terrainSubdivisions = 1000 -- Balanced subdivision count for good detail and alignment (reduced from 400)
+-- Terrain tile configuration
+local tileSize = 30               -- Size of each terrain tile (256x256 units)
+local tileSubdivisions = 30       -- Subdivisions per tile (good balance of detail and performance)
+local terrainRenderDistance = 500 -- How far to render terrain tiles (should be <= renderDistance)
+local terrainLoadDistance = 500   -- How far to load terrain tiles (increased buffer to prevent gaps)
 
--- Generate a grid mesh for terrain rendering that EXACTLY matches TerrainShape sampling
-local function generateTerrainGrid(size, subdivisions)
+-- Terrain tile management
+local terrainTiles = {}     -- Hash table: "x,z" -> tile data
+local activeTiles = {}      -- Array of currently active tiles for easy iteration
+local lastPlayerTileX = nil -- Last player tile position (for change detection)
+local lastPlayerTileZ = nil
+
+-- Function to get tile coordinates from world position
+local function worldToTileCoords(worldX, worldZ)
+  return math.floor(worldX / tileSize), math.floor(worldZ / tileSize)
+end
+
+-- Function to get tile key string
+local function getTileKey(tileX, tileZ)
+  return tileX .. "," .. tileZ
+end
+
+-- Function to get world position from tile coordinates
+local function tileToWorldCoords(tileX, tileZ)
+  return tileX * tileSize, tileZ * tileSize
+end
+
+-- Generate a single terrain tile mesh
+local function generateTerrainTile(tileX, tileZ)
   local vertices = {}
   local indices = {}
 
-  -- Generate vertices using the EXACT same coordinate system as TerrainShape
-  -- According to LOVR docs, TerrainCollider samples at regular grid points
-  local halfSize = size / 2
+  -- Calculate world offset for this tile
+  local worldOffsetX, worldOffsetZ = tileToWorldCoords(tileX, tileZ)
 
-  -- Match TerrainCollider's sampling exactly:
-  -- TerrainCollider divides the terrain into a grid and samples at grid intersections
-  local step = size / (subdivisions - 1) -- Back to original - grid intersections, not cell centers
+  -- Generate vertices for this tile
+  local step = tileSize / (tileSubdivisions - 1)
 
-  for z = 0, subdivisions - 1 do
-    for x = 0, subdivisions - 1 do
-      -- Calculate world coordinates to match TerrainShape exactly
-      -- Sample at grid intersections like TerrainCollider does
-      local worldX = -halfSize + (x * step)
-      local worldZ = -halfSize + (z * step)
+  for z = 0, tileSubdivisions - 1 do
+    for x = 0, tileSubdivisions - 1 do
+      -- Calculate world coordinates
+      local worldX = worldOffsetX + (x * step)
+      local worldZ = worldOffsetZ + (z * step)
       local worldY = terrainHeightFunction(worldX, worldZ)
 
-      -- Calculate approximate normal by sampling nearby points
+      -- Calculate normal by sampling nearby points
       local normalX, normalY, normalZ = 0, 1, 0 -- Default upward normal
 
-      if x > 0 and x < subdivisions - 1 and z > 0 and z < subdivisions - 1 then
-        -- Sample neighboring heights for normal calculation using consistent spacing
+      if x > 0 and x < tileSubdivisions - 1 and z > 0 and z < tileSubdivisions - 1 then
         local h_left = terrainHeightFunction(worldX - step, worldZ)
         local h_right = terrainHeightFunction(worldX + step, worldZ)
         local h_down = terrainHeightFunction(worldX, worldZ - step)
@@ -1015,39 +1037,323 @@ local function generateTerrainGrid(size, subdivisions)
       end
 
       table.insert(vertices, {
-        worldX, worldY, worldZ,    -- position
-        normalX, normalY, normalZ, -- calculated normal
-        x / (subdivisions - 1),    -- u coordinate
-        z / (subdivisions - 1)     -- v coordinate
+        worldX, worldY, worldZ,     -- position
+        normalX, normalY, normalZ,  -- normal
+        x / (tileSubdivisions - 1), -- u coordinate
+        z / (tileSubdivisions - 1)  -- v coordinate
       })
     end
   end
 
-  -- Generate indices for triangles with proper counter-clockwise winding
-  for z = 0, subdivisions - 2 do
-    for x = 0, subdivisions - 2 do
-      local topLeft = z * subdivisions + x + 1
-      local topRight = z * subdivisions + (x + 1) + 1
-      local bottomLeft = (z + 1) * subdivisions + x + 1
-      local bottomRight = (z + 1) * subdivisions + (x + 1) + 1
+  -- Generate indices for triangles
+  for z = 0, tileSubdivisions - 2 do
+    for x = 0, tileSubdivisions - 2 do
+      local topLeft = z * tileSubdivisions + x + 1
+      local topRight = z * tileSubdivisions + (x + 1) + 1
+      local bottomLeft = (z + 1) * tileSubdivisions + x + 1
+      local bottomRight = (z + 1) * tileSubdivisions + (x + 1) + 1
 
-      -- First triangle (counter-clockwise when viewed from above)
+      -- First triangle
       table.insert(indices, topLeft)
       table.insert(indices, topRight)
       table.insert(indices, bottomLeft)
 
-      -- Second triangle (counter-clockwise when viewed from above)
+      -- Second triangle
       table.insert(indices, topRight)
       table.insert(indices, bottomRight)
       table.insert(indices, bottomLeft)
     end
   end
 
-  print("DEBUG: Generated terrain mesh with " .. (#vertices) .. " vertices and " .. (#indices / 3) .. " triangles")
-  print("DEBUG: Terrain bounds: X(" ..
-    (-halfSize) .. " to " .. halfSize .. "), Z(" .. (-halfSize) .. " to " .. halfSize .. ")")
-
   return vertices, indices
+end
+
+-- Create a terrain tile with both physics and graphics
+local function createTerrainTile(tileX, tileZ)
+  local tileKey = getTileKey(tileX, tileZ)
+
+  -- Don't create if already exists
+  if terrainTiles[tileKey] then
+    return terrainTiles[tileKey]
+  end
+
+  -- Generate tile mesh
+  local vertices, indices = generateTerrainTile(tileX, tileZ)
+  local mesh = lovr.graphics.newMesh(vertices)
+  mesh:setIndices(indices)
+
+  -- Create terrain physics collider for this tile
+  local worldOffsetX, worldOffsetZ = tileToWorldCoords(tileX, tileZ)
+
+  -- Create a height function for this specific tile
+  -- LOVR TerrainCollider passes coordinates from -tileSize/2 to +tileSize/2
+  local function tileHeightFunction(x, z)
+    -- Convert from TerrainCollider's coordinate system to world coordinates
+    -- TerrainCollider uses -tileSize/2 to +tileSize/2, we need to offset to world coords
+    local worldX = worldOffsetX + tileSize / 2 + x
+    local worldZ = worldOffsetZ + tileSize / 2 + z
+    return terrainHeightFunction(worldX, worldZ)
+  end
+
+  local collider = world:newTerrainCollider(tileSize, tileHeightFunction, tileSubdivisions)
+  if collider then
+    -- CRITICAL: Set terrain collider as kinematic (static) so it doesn't fall
+    collider:setKinematic(true)
+
+    -- Position the collider at the tile's world position
+    -- Since TerrainCollider uses -tileSize/2 to +tileSize/2 internally, center it properly
+    collider:setPosition(worldOffsetX + tileSize / 2, 0, worldOffsetZ + tileSize / 2)
+    collider:setUserData({ type = "terrain", tileX = tileX, tileZ = tileZ })
+
+    print("DEBUG: Created kinematic terrain collider for tile (" .. tileX .. ", " .. tileZ .. ") at position (" ..
+      (worldOffsetX + tileSize / 2) .. ", 0, " .. (worldOffsetZ + tileSize / 2) .. ")")
+  else
+    print("ERROR: Failed to create terrain collider for tile (" .. tileX .. ", " .. tileZ .. ")")
+  end
+
+  -- Create tile data structure
+  local tile = {
+    tileX = tileX,
+    tileZ = tileZ,
+    worldX = worldOffsetX,
+    worldZ = worldOffsetZ,
+    mesh = mesh,
+    collider = collider,
+    vertices = vertices,
+    indices = indices
+  }
+
+  terrainTiles[tileKey] = tile
+  table.insert(activeTiles, tile)
+
+  print("Created terrain tile (" .. tileX .. ", " .. tileZ .. ") at world (" ..
+    worldOffsetX .. ", " .. worldOffsetZ .. ")")
+
+  return tile
+end
+
+-- Debug function to test terrain physics vs graphics alignment
+function debugTerrainPhysicsAlignment(testX, testZ)
+  print("=== TERRAIN PHYSICS vs GRAPHICS ALIGNMENT TEST ===")
+  print("Test position: (" .. string.format("%.2f", testX) .. ", " .. string.format("%.2f", testZ) .. ")")
+
+  -- Get graphics height from height function
+  local graphicsHeight = terrainHeightFunction(testX, testZ)
+  print("Graphics height: " .. string.format("%.3f", graphicsHeight))
+
+  -- Get physics height by raycasting
+  local physicsHeight = nil
+  local rayStartY = graphicsHeight + 50 -- Start well above expected terrain
+  local rayEndY = graphicsHeight - 10   -- End well below expected terrain
+
+  world:raycast(testX, rayStartY, testZ, testX, rayEndY, testZ, nil, function(shape, x, y, z, nx, ny, nz)
+    if shape and shape.getCollider then
+      local collider = shape:getCollider()
+      local userData = collider:getUserData()
+      if userData and userData.type == "terrain" then
+        physicsHeight = y
+        print("Physics height: " ..
+          string.format("%.3f", physicsHeight) .. " (tile " .. userData.tileX .. "," .. userData.tileZ .. ")")
+        return false -- Stop at first terrain hit
+      end
+    end
+  end)
+
+  if physicsHeight then
+    local difference = math.abs(physicsHeight - graphicsHeight)
+    print("Difference: " .. string.format("%.3f", difference) .. " units")
+
+    if difference < 0.1 then
+      print("✓ GOOD: Physics and graphics are aligned!")
+    else
+      print("✗ BAD: Significant misalignment detected!")
+    end
+  else
+    print("✗ ERROR: No physics terrain found at this location!")
+  end
+
+  print("=" .. string.rep("=", 50))
+  return physicsHeight
+end
+
+-- Debug function to check what's under the player's feet
+function debugPlayerFooting()
+  if not player then
+    print("No player found!")
+    return
+  end
+
+  local px, py, pz = player:getPosition()
+  print("=== PLAYER FOOTING DEBUG ===")
+  print("Player position: (" ..
+    string.format("%.2f", px) .. ", " .. string.format("%.2f", py) .. ", " .. string.format("%.2f", pz) .. ")")
+
+  -- Check which tile the player should be on
+  local playerTileX, playerTileZ = worldToTileCoords(px, pz)
+  local tileKey = getTileKey(playerTileX, playerTileZ)
+  local tile = terrainTiles[tileKey]
+
+  print("Player should be on tile: (" .. playerTileX .. ", " .. playerTileZ .. ")")
+  print("Tile exists: " .. tostring(tile ~= nil))
+
+  if tile then
+    print("Tile collider exists: " .. tostring(tile.collider ~= nil))
+    if tile.collider then
+      print("Tile collider kinematic: " .. tostring(tile.collider:isKinematic()))
+      local tx, ty, tz = tile.collider:getPosition()
+      print("Tile collider position: (" ..
+        string.format("%.2f", tx) .. ", " .. string.format("%.2f", ty) .. ", " .. string.format("%.2f", tz) .. ")")
+    end
+  else
+    print("WARNING: Player is not on a loaded terrain tile!")
+  end
+
+  -- Raycast down from player to see what we hit
+  print("Raycasting down from player...")
+  local hitSomething = false
+  local rayStartY = py + 0.5 -- Start slightly above player
+  local rayEndY = py - 10    -- End well below player
+
+  world:raycast(px, rayStartY, pz, px, rayEndY, pz, nil, function(shape, x, y, z, nx, ny, nz)
+    if shape and shape.getCollider then
+      local collider = shape:getCollider()
+      local userData = collider:getUserData()
+      local colliderType = userData and userData.type or "unknown"
+      print("Hit: " ..
+        colliderType .. " at Y=" .. string.format("%.3f", y) .. " (distance: " .. string.format("%.3f", py - y) .. ")")
+      hitSomething = true
+      if userData and userData.type == "terrain" then
+        return false -- Stop at first terrain hit
+      end
+    end
+  end)
+
+  if not hitSomething then
+    print("ERROR: No collision found below player - FALLING THROUGH!")
+  end
+
+  -- Check player velocity to see if falling
+  local vx, vy, vz = player:getLinearVelocity()
+  print("Player velocity: (" ..
+    string.format("%.2f", vx) .. ", " .. string.format("%.2f", vy) .. ", " .. string.format("%.2f", vz) .. ")")
+  if vy < -1 then
+    print("WARNING: Player is falling rapidly!")
+  end
+
+  print("=" .. string.rep("=", 30))
+end
+
+-- Remove a terrain tile
+local function removeTerrainTile(tileX, tileZ)
+  local tileKey = getTileKey(tileX, tileZ)
+  local tile = terrainTiles[tileKey]
+
+  if not tile then return end
+
+  -- Destroy physics collider
+  if tile.collider then
+    tile.collider:destroy()
+  end
+
+  -- Remove from active tiles array
+  for i = #activeTiles, 1, -1 do
+    if activeTiles[i] == tile then
+      table.remove(activeTiles, i)
+      break
+    end
+  end
+
+  -- Remove from tiles hash table
+  terrainTiles[tileKey] = nil
+
+  print("Removed terrain tile (" .. tileX .. ", " .. tileZ .. ")")
+end
+
+-- Update terrain tiles based on player position
+local function updateTerrainTiles()
+  if not player then return end
+
+  local playerX, playerY, playerZ = player:getPosition()
+  local playerTileX, playerTileZ = worldToTileCoords(playerX, playerZ)
+
+  -- Only update if player moved to a different tile
+  if playerTileX == lastPlayerTileX and playerTileZ == lastPlayerTileZ then
+    return
+  end
+
+  lastPlayerTileX = playerTileX
+  lastPlayerTileZ = playerTileZ
+
+  -- Calculate how many tiles to load around player (ensure minimum 3x3 grid)
+  local loadRadius = math.max(2, math.ceil(terrainLoadDistance / tileSize))
+
+  -- Mark tiles that should exist
+  local shouldExist = {}
+  for x = playerTileX - loadRadius, playerTileX + loadRadius do
+    for z = playerTileZ - loadRadius, playerTileZ + loadRadius do
+      local distance = math.sqrt((x - playerTileX) ^ 2 + (z - playerTileZ) ^ 2) * tileSize
+      if distance <= terrainLoadDistance then
+        shouldExist[getTileKey(x, z)] = { x = x, z = z }
+      end
+    end
+  end
+
+  -- Always ensure immediate 3x3 grid around player exists (prevent gaps)
+  for x = playerTileX - 1, playerTileX + 1 do
+    for z = playerTileZ - 1, playerTileZ + 1 do
+      shouldExist[getTileKey(x, z)] = { x = x, z = z }
+    end
+  end
+
+  -- Remove tiles that are too far away
+  local toRemove = {}
+  for tileKey, tile in pairs(terrainTiles) do
+    if not shouldExist[tileKey] then
+      table.insert(toRemove, { tile.tileX, tile.tileZ })
+    end
+  end
+
+  for _, coords in ipairs(toRemove) do
+    removeTerrainTile(coords[1], coords[2])
+  end
+
+  -- Create tiles that don't exist but should
+  for tileKey, coords in pairs(shouldExist) do
+    if not terrainTiles[tileKey] then
+      createTerrainTile(coords.x, coords.z)
+    end
+  end
+
+  print("Terrain tiles update: Player at tile (" .. playerTileX .. ", " .. playerTileZ ..
+    "), Active tiles: " .. #activeTiles)
+end
+
+-- Render all active terrain tiles
+local function renderTerrainTiles(pass)
+  if not player then return end
+
+  local playerX, playerY, playerZ = player:getPosition()
+  local tilesRendered = 0
+
+  pass:setColor(0.3, 0.7, 0.2) -- Green terrain color
+
+  for _, tile in ipairs(activeTiles) do
+    -- Calculate distance from player to tile center
+    local tileCenterX = tile.worldX + tileSize / 2
+    local tileCenterZ = tile.worldZ + tileSize / 2
+    local distance = math.sqrt((tileCenterX - playerX) ^ 2 + (tileCenterZ - playerZ) ^ 2)
+
+    -- Only render if within render distance
+    if distance <= terrainRenderDistance then
+      pass:draw(tile.mesh)
+      tilesRendered = tilesRendered + 1
+    end
+  end
+
+  -- Debug: Print tile count occasionally
+  if math.random() < 0.01 then -- 1% chance per frame
+    print("Terrain tiles rendered: " .. tilesRendered .. "/" .. #activeTiles)
+  end
 end
 
 -- Simple test terrain height function - for debugging alignment issues
@@ -1091,121 +1397,65 @@ function terrainHeightFunction(x, z)
   return finalHeight
 end
 
--- Create terrain physics and graphics
+-- Initialize infinite terrain tile system
 function createTerrain()
-  print("Creating terrain with TerrainShape...")
+  print("Initializing infinite terrain tile system...")
 
-  -- Try a simple test terrain first to diagnose the issue
-  print("DEBUG: Testing simple terrain height function...")
+  -- Initialize tile management variables
+  terrainTiles = {}
+  activeTiles = {}
+  lastPlayerTileX = nil
+  lastPlayerTileZ = nil
+
+  -- Test height function at key points to verify it's working
+  print("DEBUG: Testing terrain height function...")
   local testPositions = { { 0, 0 }, { 100, 0 }, { 0, 100 }, { -100, 0 }, { 0, -100 } }
   for i, pos in ipairs(testPositions) do
     local height = terrainHeightFunction(pos[1], pos[2])
     print("  Height at (" .. pos[1] .. ", " .. pos[2] .. "): " .. string.format("%.3f", height))
   end
 
-  -- Create terrain physics collider using TerrainShape with callback function
-  -- Use same subdivision count as visual mesh for perfect alignment
-  print("DEBUG: Creating TerrainCollider with size=" .. terrainSize .. ", subdivisions=" .. terrainSubdivisions)
+  print("Infinite terrain system initialized successfully!")
+  print("Tile size: " .. tileSize .. "x" .. tileSize .. " units")
+  print("Tile subdivisions: " .. tileSubdivisions)
+  print("Terrain render distance: " .. terrainRenderDistance .. " units")
+  print("Terrain load distance: " .. terrainLoadDistance .. " units")
 
-  -- LOVR TerrainCollider has a bug where collision surface != raycast surface
-  -- Try a different approach: adjust the height function or create with minimal subdivisions
-  print("DEBUG: TerrainCollider has collision/raycast mismatch - trying minimal subdivisions...")
-
-  -- Try with very low subdivisions first to see if high subdivision count causes the offset
-  terrainCollider = world:newTerrainCollider(terrainSize, terrainHeightFunction, 32)
-
-  if not terrainCollider then
-    print("DEBUG: Failed with 32 subdivisions, trying without subdivisions parameter...")
-    terrainCollider = world:newTerrainCollider(terrainSize, terrainHeightFunction)
-  end
-
-  if not terrainCollider then
-    print("DEBUG: All approaches failed, trying with original parameters...")
-    terrainCollider = world:newTerrainCollider(terrainSize, terrainHeightFunction, terrainSubdivisions)
-  end
-
-  if terrainCollider then
-    print("DEBUG: TerrainCollider created successfully")
-    terrainCollider:setUserData({ type = "terrain" })
-
-    local tx, ty, tz = terrainCollider:getPosition()
-    -- Convert coordinates to numbers to avoid concatenation errors
-    local posX = tonumber(tx) or 0
-    local posY = tonumber(ty) or 0
-    local posZ = tonumber(tz) or 0
-    print("DEBUG: TerrainCollider position: (" ..
-      string.format("%.3f", posX) .. ", " .. string.format("%.3f", posY) .. ", " .. string.format("%.3f", posZ) .. ")")
-    print("DEBUG: TerrainCollider kinematic: " .. tostring(terrainCollider:isKinematic()))
-  else
-    print("ERROR: Failed to create TerrainCollider!")
-  end
-
-  -- According to LOVR docs, terrain colliders are automatically kinematic and positioned at 0,0,0
-  print("DEBUG: Terrain collider kinematic:", terrainCollider:isKinematic())
-  print("DEBUG: Terrain collider position:", terrainCollider:getPosition())
-
-  -- Test for potential coordinate system misalignment
-  print("DEBUG: Testing terrain coordinate alignment...")
-  local testPositions = {
-    { 0, 0 }, { 100, 0 }, { 0, 100 }, { -100, 0 }, { 0, -100 }
-  }
-
-  for i, pos in ipairs(testPositions) do
-    local physicsHeight = terrainHeightFunction(pos[1], pos[2])
-    print("DEBUG: Position (" .. pos[1] .. ", " .. pos[2] .. ") -> Height: " .. physicsHeight)
-  end
-
-  -- Generate terrain mesh for rendering using the EXACT same coordinate system as TerrainShape
-  local vertices, indices = generateTerrainGrid(terrainSize, terrainSubdivisions)
-  terrainMesh = lovr.graphics.newMesh(vertices)
-  terrainMesh:setIndices(indices)
-
-  print("Terrain created successfully - Size: " .. terrainSize .. "x" .. terrainSize ..
-    " units, Mesh subdivisions: " .. terrainSubdivisions)
-  print("Physics and graphics both use same coordinate system: -" .. (terrainSize / 2) .. " to +" .. (terrainSize / 2))
-
-  -- Test height function at key points to verify it's working
-  print("DEBUG: Height at (0,0):", terrainHeightFunction(0, 0))
-  print("DEBUG: Height at (100,100):", terrainHeightFunction(100, 100))
-  print("DEBUG: Height at (-100,-100):", terrainHeightFunction(-100, -100))
-  print("DEBUG: Height at (500,0):", terrainHeightFunction(500, 0))
-  print("DEBUG: Height at (1000,0):", terrainHeightFunction(1000, 0))
-
-  -- Debug: Check if the mesh vertices match the height function
-  print("DEBUG: Checking first few mesh vertices...")
-  for i = 1, math.min(5, #vertices) do
-    local v = vertices[i]
-    local expectedHeight = terrainHeightFunction(v[1], v[3])
-    print("DEBUG: Vertex " ..
-      i .. ": pos(" .. v[1] .. ", " .. v[2] .. ", " .. v[3] .. ") expected height: " .. expectedHeight)
-  end
+  -- Initial tiles will be created when player position is first available
 end
 
 -- Function to get terrain height at any world position (for object placement)
+-- Now works with infinite coordinates since we have infinite terrain tiles
 function getTerrainHeight(x, z)
-  -- Check if position is within terrain bounds (same bounds as mesh generation)
-  local halfSize = terrainSize / 2
-  if x < -halfSize or x > halfSize or z < -halfSize or z > halfSize then
-    return 0 -- Default height outside terrain bounds
-  end
-
   -- Use the same height function as both physics and graphics
+  -- No bounds checking needed with infinite terrain
   return terrainHeightFunction(x, z)
 end
 
 -- Function to get physics collision height (simplified approach)
 function getPhysicsTerrainHeight(x, z)
   local visualHeight = getTerrainHeight(x, z)
-  -- Use global spawn height offset
-  return visualHeight + spawnHeightOffset
+  -- Now that terrain collision is fixed, spawn at proper height
+  return visualHeight + 0.1 -- Just slightly above terrain to prevent clipping
 end
 
--- Debug function to test terrain physics vs graphics alignment
-function debugTerrainAlignment(testX, testZ)
-  if not terrainCollider then
-    print("DEBUG: terrainCollider is nil!")
-    return 999
+-- Function to get safe spawn height (at least 1 meter above terrain)
+function getSafeSpawnHeight(x, z)
+  local terrainHeight = getTerrainHeight(x, z)
+  local safeHeight = terrainHeight + 1.0 -- Always 1 meter above terrain for safe spawning
+
+  -- Debug print occasionally to verify safe spawning
+  if math.random() < 0.1 then -- 10% chance to print
+    print("DEBUG: Safe spawn at (" .. string.format("%.1f", x) .. ", " .. string.format("%.1f", z) ..
+      ") - Terrain: " .. string.format("%.2f", terrainHeight) ..
+      " -> Safe: " .. string.format("%.2f", safeHeight))
   end
+
+  return safeHeight
+end
+
+-- Debug function to test terrain physics vs graphics alignment with tile system
+function debugTerrainAlignment(testX, testZ)
   if not player then
     print("DEBUG: player is nil!")
     return 999
@@ -1214,17 +1464,26 @@ function debugTerrainAlignment(testX, testZ)
   -- Get expected height from height function
   local expectedHeight = terrainHeightFunction(testX, testZ)
 
-  -- Debug terrain collider info
-  print("DEBUG: Terrain collider exists: " .. tostring(terrainCollider ~= nil))
-  if terrainCollider then
-    local tx, ty, tz = terrainCollider:getPosition()
+  -- Find which tile this position belongs to
+  local tileX, tileZ = worldToTileCoords(testX, testZ)
+  local tileKey = getTileKey(tileX, tileZ)
+  local tile = terrainTiles[tileKey]
+
+  -- Debug terrain tile info
+  print("DEBUG: Testing position (" .. testX .. ", " .. testZ .. ")")
+  print("DEBUG: Belongs to tile (" .. tileX .. ", " .. tileZ .. ")")
+  print("DEBUG: Tile exists: " .. tostring(tile ~= nil))
+  if tile and tile.collider then
+    local tx, ty, tz = tile.collider:getPosition()
     -- Convert coordinates to numbers to avoid concatenation errors
     local posX = tonumber(tx) or 0
     local posY = tonumber(ty) or 0
     local posZ = tonumber(tz) or 0
-    print("DEBUG: Terrain collider position: (" ..
+    print("DEBUG: Tile collider position: (" ..
       string.format("%.3f", posX) .. ", " .. string.format("%.3f", posY) .. ", " .. string.format("%.3f", posZ) .. ")")
-    print("DEBUG: Terrain collider kinematic: " .. tostring(terrainCollider:isKinematic()))
+    print("DEBUG: Tile collider kinematic: " .. tostring(tile.collider:isKinematic()))
+  else
+    print("DEBUG: Tile not loaded or has no collider!")
   end
 
   -- Test physics collision by raycasting downward from high above
@@ -1398,10 +1657,8 @@ end
 -- ============================================================================
 -- Render functions for different object types with custom shadow parameters
 local function render_terrain(pass)
-  if terrainMesh then
-    pass:setColor(0.3, 0.7, 0.2) -- Green terrain color
-    pass:draw(terrainMesh)
-  end
+  -- Use the new tile-based terrain rendering system
+  renderTerrainTiles(pass)
 end
 
 local function render_players_and_npcs(pass)
@@ -1711,15 +1968,16 @@ function lovr.load()
   if hudFont.setPixelDensity then
     hudFont:setPixelDensity(2)       -- Higher pixel density for sharper text
   end
+  -- Load the custom terrain model
 
   -- Load player model
-  playerModel = lovr.graphics.newModel("scene.gltf")
+  playerModel = lovr.graphics.newModel("characterModel/scene.gltf")
 
   --load the rock model
   rockModel = lovr.graphics.newModel("rockModel/scene.gltf")
 
   -- Load separate NPC model (same file but different instance for independent animation)
-  npcModel = lovr.graphics.newModel("scene.gltf")
+  npcModel = lovr.graphics.newModel("characterModel/scene.gltf")
 
   serverPort = 6789
   lastNetworkUpdate = 0
@@ -1752,10 +2010,14 @@ function lovr.load()
   end
 
   lovr.mouse.setRelativeMode(true)
+  worldsettings = {
+    maxColliders = 1000000,
+    maxPenetration = 0
 
+  }
   -- Create physics world with traditional settings first (try simple approach)
-  world = lovr.physics.newWorld(0, -9.81, 0)
-
+  world = lovr.physics.newWorld(worldsettings)
+  world:setGravity(0, -9.81, 0)
   -- Try setting world contact properties to prevent phasing
   world:setLinearDamping(0.01)
   world:setAngularDamping(0.01)
@@ -1763,26 +2025,23 @@ function lovr.load()
   -- Global render distance configuration
   renderDistance = 500 -- Master render distance for all objects
 
-  -- Initialize new terrain system
+  -- Initialize new infinite terrain tile system
   createTerrain()
 
   -- Calculate spawn height (after terrain is created)
   local terrainHeight = getTerrainHeight(0, 0)
   print("DEBUG: Terrain height at spawn:", terrainHeight)
 
-  -- SIMPLE WORKAROUND: Spawn above visual terrain and let player fall to collision surface
-  print("DEBUG: Visual terrain height:", terrainHeight)
-
-  -- Use global spawn height offset
-  local spawnHeight = terrainHeight + spawnHeightOffset
-  print("DEBUG: Spawn height (will fall to collision surface):", spawnHeight)
+  -- Use standardized safe spawn height (1 meter above terrain)
+  local spawnHeight = getSafeSpawnHeight(0, 0)
+  print("DEBUG: Safe spawn height (1m above terrain):", spawnHeight)
 
   -- Player physics body (cylinder for character controller) - VERTICAL orientation
   player = world:newBoxCollider(0, spawnHeight, 0, boxColliderWidth, boxColliderHeight, boxColliderDepth)
   -- Box colliders are naturally vertical (Y-axis aligned), no rotation needed
-  player:setLinearDamping(5.0)   -- Much higher damping to reduce sliding
-  player:setAngularDamping(10.0) -- Very high angular damping
-  player:setFriction(1.0)        -- Maximum friction to reduce sliding
+  player:setLinearDamping(1.0)  -- Reasonable damping for 70kg human
+  player:setAngularDamping(5.0) -- Prevent spinning but allow movement
+  player:setFriction(1.0)       -- Maximum friction to reduce sliding
 
   -- Set additional collision properties to prevent phasing
   player:setRestitution(0.6) -- Bouncy for fun physics
@@ -1804,6 +2063,10 @@ function lovr.load()
     yaw = 0,
     fov = math.pi / 2
   }
+
+  -- Generate initial terrain tiles around spawn point
+  print("Generating initial terrain tiles around spawn...")
+  updateTerrainTiles()
 
   -- Generate house-sized cubes across the terrain (deterministic placement)
   houses = {}
@@ -1948,16 +2211,15 @@ function lovr.load()
         if clearSpace then break end
       until attempts > 50 -- Give up after 50 attempts
 
-      -- Create physics body for NPC (positioned so bottom sits on collision surface)
-      local npcSpawnHeight = getPhysicsTerrainHeight(spawnX, spawnZ) + boxColliderHeight / 2 +
-          0.1 -- Slightly above collision surface
+      -- Create physics body for NPC (positioned at safe height above terrain)
+      local npcSpawnHeight = getSafeSpawnHeight(spawnX, spawnZ)
       local npcBody = world:newBoxCollider(spawnX, npcSpawnHeight, spawnZ, boxColliderWidth,
         boxColliderHeight, boxColliderDepth)
       -- Box colliders are naturally vertical (Y-axis aligned), no rotation needed
-      npcBody:setLinearDamping(2.0)   -- Much lower damping to allow movement
-      npcBody:setAngularDamping(15.0) -- Prevent spinning
-      npcBody:setFriction(0.3)        -- Lower friction for easier movement
-      npcBody:setRestitution(0.6)     -- Bouncy for fun physics
+      npcBody:setLinearDamping(1.0)  -- Reasonable damping for 70kg human
+      npcBody:setAngularDamping(5.0) -- Prevent spinning but allow movement
+      npcBody:setFriction(0.3)       -- Lower friction for easier movement
+      npcBody:setRestitution(0.6)    -- Bouncy for fun physics
 
       -- Set heavy mass and realistic inertia for better gravity response (same as player)
       npcBody:setMass(playerNPCMass)
@@ -2136,15 +2398,23 @@ function lovr.update(dt)
     local speedMultiplier = isSprinting and 3.0 or 1.0 -- 3x speed when sprinting
 
     -- Apply force in world coordinates
-    local force = camera.movespeed * speedMultiplier * playerNPCSpeed -- Base force with sprint multiplier
+    local force = camera.movespeed * speedMultiplier * playerSpeed -- Base force with sprint multiplier
     player:applyForce(worldX * force, 0, worldZ * force)
+
+    -- Debug: Print movement info occasionally
+    if math.random() < 0.05 then -- 5% chance per frame when moving
+      local vx, vy, vz = player:getLinearVelocity()
+      print("DEBUG Player - Force:", string.format("%.0f", force), "Velocity:",
+        string.format("%.2f,%.2f,%.2f", vx, vy, vz))
+    end
   else
-    -- Apply much stronger damping when no input to stop sliding immediately
+    -- Apply damping when no input to stop sliding
     local vx, vy, vz = player:getLinearVelocity()
-    player:applyForce(-vx * 500, 0, -vz * 500) -- Much stronger counter-force
+    player:applyForce(-vx * 50, 0, -vz * 50) -- Reasonable counter-force for 70kg mass
   end
 
-  -- Terrain no longer needs updates - it's a single static collider
+  -- Update infinite terrain tiles based on player position
+  updateTerrainTiles()
 
   -- Update house colliders based on player distance
   updateHouseColliders()
@@ -2161,6 +2431,30 @@ function lovr.update(dt)
 
   -- Rotate player collider to match camera yaw
   player:setOrientation(camera.yaw, 0, 1, 0) -- angle, ax, ay, az format
+
+  -- DEBUG: Check if player is falling through terrain
+  local vx, vy, vz = player:getLinearVelocity()
+  if vy < -5 then -- If falling fast
+    print("WARNING: Player falling rapidly! Y velocity: " .. string.format("%.2f", vy) .. " at position (" ..
+      string.format("%.1f", playerX) ..
+      ", " .. string.format("%.1f", playerY) .. ", " .. string.format("%.1f", playerZ) .. ")")
+
+    -- Check if player has fallen below expected terrain
+    local expectedHeight = terrainHeightFunction(playerX, playerZ)
+    if playerY < expectedHeight - 5 then -- 5 units below expected terrain
+      print("CRITICAL: Player has fallen well below terrain! Expected: " .. string.format("%.2f", expectedHeight) ..
+        ", Actual: " .. string.format("%.2f", playerY))
+
+      -- Emergency respawn if player falls too far
+      if playerY < expectedHeight - 20 then
+        print("EMERGENCY RESPAWN: Moving player back to safe height")
+        local safeHeight = getSafeSpawnHeight(playerX, playerZ)
+        player:setPosition(playerX, safeHeight, playerZ)
+        player:setLinearVelocity(0, 0, 0)
+        player:setAngularVelocity(0, 0, 0)
+      end
+    end
+  end
 
   -- Update camera transform
   camera.transform:identity()
@@ -2723,54 +3017,72 @@ function lovr.keypressed(key)
         print("Selected inventory slot " .. slotNumber)
       end
     elseif key == 'r' then
-      -- Reset/respawn player - spawn above visual terrain and let them fall
-      local visualHeight = getTerrainHeight(0, 0)
-      local spawnHeight = visualHeight + spawnHeightOffset -- Use global offset
+      -- Reset/respawn player at safe spawn height
+      local spawnHeight = getSafeSpawnHeight(0, 0)
       player:setPosition(0, spawnHeight, 0)
       player:setLinearVelocity(0, 0, 0)
       player:setAngularVelocity(0, 0, 0)
       camera.position:set(0, spawnHeight + cameraHeightOffset, 0)
-      print("Respawned player above visual terrain at: " .. spawnHeight .. " (will fall to collision surface)")
+      print("Respawned player at safe spawn height: " .. spawnHeight .. " (1m above terrain)")
     elseif key == 't' then
-      -- Test terrain alignment at current player position
+      -- Test terrain physics vs graphics alignment at current player position
       local px, py, pz = player:getPosition()
-      print("Testing terrain alignment at player position...")
-      debugTerrainAlignment(px, pz)
+      print("Testing terrain physics/graphics alignment at player position...")
+      debugTerrainPhysicsAlignment(px, pz)
 
-      -- Also test a few nearby points to see the pattern
-      print("Testing nearby points for slope analysis...")
-      for i = -2, 2 do
-        for j = -2, 2 do
-          if i ~= 0 or j ~= 0 then   -- Skip the center point (already tested)
-            local testX = px + i * 5 -- Test points 5 units apart
-            local testZ = pz + j * 5
-            local diff = debugTerrainAlignment(testX, testZ)
-            if diff > 0.5 then -- Flag significant differences
-              print("  WARNING: Large difference at offset (" ..
-                i * 5 .. ", " .. j * 5 .. "): " .. string.format("%.3f", diff))
-            end
+      -- Also test a few nearby points to verify consistency
+      print("Testing nearby points for alignment verification...")
+      for i = -1, 1 do
+        for j = -1, 1 do
+          if i ~= 0 or j ~= 0 then    -- Skip the center point (already tested)
+            local testX = px + i * 10 -- Test points 10 units apart
+            local testZ = pz + j * 10
+            local physicsHeight = debugTerrainPhysicsAlignment(testX, testZ)
           end
         end
       end
     elseif key == 'y' then
-      -- Test with simple terrain function to isolate the coordinate system issue
-      print("Testing simple terrain alignment...")
+      -- Show terrain tile system information
+      print("=== TERRAIN TILE SYSTEM DEBUG ===")
       local px, py, pz = player:getPosition()
+      local playerTileX, playerTileZ = worldToTileCoords(px, pz)
 
-      -- Test simple terrain function directly
-      local simpleHeight = simpleTerrainHeightFunction(px, pz)
-      local complexHeight = terrainHeightFunction(px, pz)
+      print("Player position: (" .. string.format("%.2f", px) .. ", " .. string.format("%.2f", pz) .. ")")
+      print("Player tile: (" .. playerTileX .. ", " .. playerTileZ .. ")")
+      print("Active tiles: " .. #activeTiles)
+      print("Loaded tiles:")
 
-      print("At position (" .. px .. ", " .. pz .. "):")
-      print("  Simple terrain height: " .. string.format("%.3f", simpleHeight))
-      print("  Complex terrain height: " .. string.format("%.3f", complexHeight))
+      local tileList = {}
+      for tileKey, tile in pairs(terrainTiles) do
+        table.insert(tileList, {
+          key = tileKey,
+          x = tile.tileX,
+          z = tile.tileZ,
+          distance = math.sqrt((tile.tileX - playerTileX) ^ 2 + (tile.tileZ - playerTileZ) ^ 2)
+        })
+      end
 
-      -- Test coordinate system variations
-      print("  Coordinate system tests for simple terrain:")
-      print("    Normal (x,z): " .. string.format("%.3f", simpleTerrainHeightFunction(px, pz)))
-      print("    Swapped (z,x): " .. string.format("%.3f", simpleTerrainHeightFunction(pz, px)))
-      print("    Negative X (-x,z): " .. string.format("%.3f", simpleTerrainHeightFunction(-px, pz)))
-      print("    Negative Z (x,-z): " .. string.format("%.3f", simpleTerrainHeightFunction(px, -pz)))
+      -- Sort by distance from player
+      table.sort(tileList, function(a, b) return a.distance < b.distance end)
+
+      for i, tile in ipairs(tileList) do
+        if i <= 10 then -- Show first 10 tiles
+          print("  Tile (" .. tile.x .. ", " .. tile.z .. ") - Distance: " .. string.format("%.1f", tile.distance))
+        end
+      end
+
+      if #tileList > 10 then
+        print("  ... and " .. (#tileList - 10) .. " more tiles")
+      end
+
+      -- Force a tile update
+      print("Forcing terrain tile update...")
+      lastPlayerTileX = nil -- Force update
+      lastPlayerTileZ = nil
+      updateTerrainTiles()
+    elseif key == 'f' then
+      -- Debug player footing (what's under the player's feet)
+      debugPlayerFooting()
     elseif key == 'u' then
       -- Direct raycast vs physics comparison at player position
       print("=== DIRECT TERRAIN RAYCAST vs PHYSICS TEST ===")
@@ -3204,7 +3516,8 @@ function drawPlayerListHUD(pass)
   pass:text("Players: " .. playerCount, 0.02, 0, 0.01, 0.015)
 
   -- Show terrain info
-  pass:text("Terrain: TerrainShape (" .. terrainSize .. "x" .. terrainSize .. ")", 0.02, -0.015, 0.01, 0.015)
+  pass:text("Terrain: Infinite Tiles (" .. tileSize .. "x" .. tileSize .. " each, " .. #activeTiles .. " loaded)", 0.02,
+    -0.015, 0.01, 0.015)
 
   -- Show house collider count
   local houseColliderCount = 0
@@ -3370,14 +3683,14 @@ function updateNPCs(dt)
     -- 4. COMBINE ALL FORCES
     -- Avoidance has highest priority
     if avoidanceFound then
-      npc.desiredVelocity:add(npc.avoidanceForce:mul(playerNPCSpeed)) -- Strong avoidance
+      npc.desiredVelocity:add(npc.avoidanceForce:mul(npcSpeed)) -- Strong avoidance
       npc.state = "avoiding"
     end
 
     -- Add separation force - REMOVED
 
     -- Add wandering force (lower priority)
-    npc.desiredVelocity:add(wanderForce:mul(playerNPCSpeed))
+    npc.desiredVelocity:add(wanderForce:mul(npcSpeed))
 
     -- Limit maximum speed (increased limit)
     local maxSpeed = npcConfig.maxSpeed * npcSpeedLimit -- higher speed limit
@@ -3393,6 +3706,16 @@ function updateNPCs(dt)
 
     -- Apply the steering force to the physics body (increased multiplier)
     npc.body:applyForce(steeringForce.x * 50, 0, steeringForce.z * 50)
+
+    -- Debug: Print NPC movement info for first NPC occasionally
+    if npc.id == 1 and math.random() < 0.1 then -- First NPC, 10% chance
+      local vx, vy, vz = npc.body:getLinearVelocity()
+      local forceApplied = math.sqrt((steeringForce.x * 50) ^ 2 + (steeringForce.z * 50) ^ 2)
+      print("DEBUG NPC1 - DesiredVel:", string.format("%.2f", npc.desiredVelocity:length()),
+        "Force:", string.format("%.0f", forceApplied),
+        "Velocity:", string.format("%.2f", math.sqrt(vx ^ 2 + vz ^ 2)),
+        "State:", npc.state)
+    end
 
     -- Rotate NPC collider using the EXACT same logic as model rotation in drawNPCs
     local vel = lovr.math.newVec3(npc.body:getLinearVelocity())
