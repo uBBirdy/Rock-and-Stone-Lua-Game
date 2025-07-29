@@ -3,8 +3,8 @@ lovr.system.openConsole()
 -- ENet multiplayer implementation embedded directly
 local enet = require 'enet'
 local z = -2
-local light_pos = lovr.math.newVec3(0, 0, 0)
-local light_orthographic = true -- Use orthographic light
+-- Removed single light_pos - now using multiple light posts
+local light_orthographic = true -- Keep for potential future use
 local shadow_map_size = 4096
 
 local debug_render_from_light = false -- Enable to render scene from light
@@ -14,10 +14,10 @@ local debug_show_shadow_map = false   -- Enable to view shadow map in overlap
 local modelHeightOffset = -0.45    -- Adjust this to move player models up (+) or down (-)
 local npcModelHeightOffset = -0.45 -- Separate height offset for NPCs (they need different positioning)
 local cameraHeightOffset = 0.37
-local playerSpeed = 150            -- Player movement force multiplier (adjusted for 70kg mass)
+local playerSpeed = 300            -- Player movement force multiplier (adjusted for 70kg mass)
 local npcSpeed = 50                -- NPC movement force multiplier (increased for 70kg mass)
 local npcSpeedLimit = 5            -- NPC maximum speed limit
-local playerJumpForce = 800
+local playerJumpForce = 200
 
 -- Physics parameters
 -- Physics collider dimensions for boxes
@@ -49,9 +49,21 @@ local shadow_far_plane = 100   -- How far shadows extend from the light
 local shadow_radius = 50       -- How wide the shadow area covers (orthographic only)
 local shadow_fov = math.pi / 2 -- Field of view for perspective shadows
 
--- Light parameters
+-- Light parameters (now used for all light posts)
 local light_intensity = 1             -- Light strength multiplier
 local light_color = { 1.0, 1.0, 0.8 } -- Light color (R, G, B)
+
+-- Light posts system
+local lightPosts = {}
+local maxLights = 10000       -- Maximum number of lights the shader can handle
+local lightPostHeight = 2     -- Height of light posts
+local lightPostSpacing = 30   -- Distance between light posts
+local lightRange = 30         -- Default light range
+local lightBrightness = 1.2   -- Brightness multiplier for light posts
+local lightsOnAllRocks = true -- If true, put lights on ALL rocks; if false, avoid rocks near houses
+
+-- Global stats for debug display
+local globalLightsRendered = 0
 
 local shader, render_texture
 local shadow_map_texture, shadow_map_sampler
@@ -284,7 +296,7 @@ function MultiplayerENetClient:processMessage(message)
       playerCollider:setLinearDamping(1.0)  -- Same damping as local player (fixed)
       playerCollider:setAngularDamping(5.0) -- Prevent spinning (fixed)
       playerCollider:setFriction(1.0)       -- High friction to reduce sliding
-      playerCollider:setRestitution(0.6)    -- Bouncy for fun physics
+      playerCollider:setRestitution(0)      -- Bouncy for fun physics
 
       -- Set heavy mass and realistic inertia for better gravity response (same as local player)
       playerCollider:setMass(playerNPCMass)
@@ -431,7 +443,7 @@ function MultiplayerENetClient:processMessage(message)
         npcBody:setLinearDamping(1.0)  -- Same damping as host (fixed)
         npcBody:setAngularDamping(5.0) -- Same damping as host (fixed)
         npcBody:setFriction(0.3)       -- Same friction as host
-        npcBody:setRestitution(0.6)    -- Bouncy for fun physics
+        npcBody:setRestitution(0)      -- Bouncy for fun physics
 
         -- Set heavy mass and realistic inertia for better gravity response (same as host NPCs)
         npcBody:setMass(playerNPCMass)
@@ -1763,6 +1775,54 @@ local function render_misc_objects(pass)
   end
 end
 
+-- Function to render light posts
+local function render_light_posts(pass)
+  if not lightPosts then return end
+
+  -- Get player position for distance calculation
+  local playerX, playerY, playerZ = 0, 0, 0
+  if player then
+    playerX, playerY, playerZ = player:getPosition()
+  end
+
+  globalLightsRendered = 0 -- Reset the global counter
+
+  for _, lightPost in ipairs(lightPosts) do
+    -- Calculate distance from player to light post
+    local distance = math.sqrt((lightPost.x - playerX) ^ 2 + (lightPost.z - playerZ) ^ 2)
+
+    -- Only render if within render distance
+    if distance <= renderDistance then
+      -- Draw magical crystal base (dark crystal material)
+      pass:setColor(0.1, 0.1, 0.2)
+      pass:box(lightPost.x, lightPost.y - 0.8, lightPost.z, 0.4, 0.6, 0.4)
+
+      -- Draw crystal stem (slightly glowing)
+      pass:setColor(0.2, 0.2, 0.4)
+      pass:box(lightPost.x, lightPost.y - 0.3, lightPost.z, 0.2, 0.8, 0.2)
+
+      -- Draw bright magical orb (main light source)
+      pass:setColor(lightPost.color[1], lightPost.color[2], lightPost.color[3])
+      pass:sphere(lightPost.x, lightPost.y + 0.2, lightPost.z, 0.7)
+
+      -- Add a smaller inner glow effect
+      pass:setColor(
+        math.min(1, lightPost.color[1] * 1.5),
+        math.min(1, lightPost.color[2] * 1.5),
+        math.min(1, lightPost.color[3] * 1.5)
+      )
+      pass:sphere(lightPost.x, lightPost.y + 0.2, lightPost.z, 0.4)
+
+      globalLightsRendered = globalLightsRendered + 1
+    end
+  end
+
+  -- Debug: Print light post count occasionally
+  if math.random() < 0.01 then -- 1% chance per frame
+    print("Light posts rendered: " .. globalLightsRendered .. "/" .. #lightPosts)
+  end
+end
+
 -- Combined render function for compatibility
 local function render_scene(pass)
   render_terrain(pass)
@@ -1780,52 +1840,45 @@ local function lighting_shader()
 ]]
 
   local fs = [[
-  uniform vec3 lightPos;
-  uniform mat4 lightSpaceMatrix;
-  uniform bool lightOrthographic;
-  uniform float lightIntensity;
-  uniform vec3 lightColor;
+  // Multiple lights system (no shadows for simplicity)
+  uniform int numLights;
+  uniform vec3 lightPositions[16];
+  uniform vec3 lightColors[16];
+  uniform float lightIntensities[16];
+  uniform float lightRanges[16];
 
-  uniform texture2D shadowMapTexture;
-
-  vec4 diffuseLighting(vec3 lightDir, vec3 normal, float shadow) {
-    float diff = max(dot(normal, lightDir), 0.0);
-    vec4 diffuse = diff * vec4(lightColor * lightIntensity, 1.0);
+  vec4 multiLightLighting(vec3 worldPos, vec3 normal) {
     vec4 baseColor = Color * getPixel(ColorTexture, UV);
     vec4 ambience = vec4(0.05, 0.05, 0.1, 1.0);
-    return baseColor * (ambience + (1 - shadow) * diffuse);
-  }
+    vec3 totalDiffuse = vec3(0.0);
 
-  // Falloff shadow near edge of light bounds/frustum
-  float shadowFalloff(vec2 uv) {
-    const float margin = 0.05;
-    uv = clamp(uv, vec2(0,0), vec2(1,1));
-    float dx = 1;
-    if (uv.x < margin) dx = uv.x / margin;
-    else if (uv.x > 1 - margin) dx = ( 1 - uv.x ) / margin;
-    float dy = 1;
-    if (uv.y < margin) dy = uv.y / margin;
-    else if (uv.y > 1 - margin) dy = ( 1 - uv.y ) / margin;
-    return dx * dy;
+    // Calculate lighting from all light posts
+    for (int i = 0; i < numLights && i < 16; i++) {
+      vec3 lightDir = lightPositions[i] - worldPos;
+      float distance = length(lightDir);
+
+      // Skip if beyond light range
+      if (distance > lightRanges[i]) continue;
+
+      lightDir = normalize(lightDir);
+
+      // Calculate attenuation (light falloff with distance)
+      float attenuation = 1.0 - (distance / lightRanges[i]);
+      attenuation = attenuation * attenuation; // Quadratic falloff
+
+      // Calculate diffuse lighting
+      float diff = max(dot(normal, lightDir), 0.0);
+      vec3 diffuse = diff * lightColors[i] * lightIntensities[i] * attenuation;
+
+      totalDiffuse += diffuse;
+    }
+
+    return baseColor * (ambience + vec4(totalDiffuse, 0.0));
   }
 
   vec4 lovrmain() {
-    vec3 lightDir = normalize(lightPos - PositionWorld);
     vec3 normal = normalize(Normal);
-    vec4 positionLightSpace = lightSpaceMatrix * vec4(PositionWorld, 1);
-    vec3 positionLightSpaceProj = 0.5 * (positionLightSpace.xyz / positionLightSpace.w) + 0.5;
-    vec4 shadowMap = getPixel(shadowMapTexture, positionLightSpaceProj.xy);
-    float closestDepth = shadowMap.r * 0.5 + 0.5;
-    float currentDepth = positionLightSpaceProj.z;
-    float bias = max(0.05 * (1.0 - dot(normal, lightDir)), 0.005);
-    float falloff = shadowFalloff(positionLightSpaceProj.xy);
-    float shadow;
-    if (lightOrthographic) {
-      shadow = ((currentDepth - bias) >= closestDepth) ? 1.0 : 0.0;
-    } else {
-      shadow = ((currentDepth + bias) <= closestDepth) ? 1.0 : 0.0;
-    }
-    return diffuseLighting(lightDir, normal, falloff * shadow);
+    return multiLightLighting(PositionWorld, normal);
   }
 ]]
 
@@ -1914,37 +1967,9 @@ local function debug_passes(pass)
 end
 
 function lovr.load()
-  -- Set up shader
+  -- Set up multi-light shader (no shadows)
   shader = lighting_shader()
   lovr.graphics.setBackgroundColor(0x4782B3)
-
-  local shadow_map_format = debug_render_from_light and 'rgba8' or 'd32f'
-
-  shadow_map_texture = lovr.graphics.newTexture(shadow_map_size, shadow_map_size, {
-    format = shadow_map_format,
-    linear = false,
-    mipmaps = false
-  })
-
-  shadow_map_sampler = lovr.graphics.newSampler({ wrap = 'clamp' })
-
-  if lovr.headset then
-    local width, height = lovr.headset.getDisplayDimensions()
-    local layers = lovr.headset.getViewCount()
-    render_texture = lovr.graphics.newTexture(width, height, layers, { mipmaps = false })
-  else
-    local width, height = lovr.system.getWindowDimensions()
-    render_texture = lovr.graphics.newTexture(width, height, 1, { mipmaps = false })
-  end
-
-  if debug_render_from_light then
-    shadow_map_pass = lovr.graphics.newPass({ shadow_map_texture, samples = 1 })
-  else
-    shadow_map_pass = lovr.graphics.newPass({ depth = shadow_map_texture, samples = 1 })
-    shadow_map_pass:setClear({ depth = light_orthographic and 1 or 0 })
-  end
-
-  lighting_pass = lovr.graphics.newPass(render_texture)
   -- Game state management
   gameState = "playing" -- "playing", "menu", "ip_input", "settings"
   menuSelection = 1
@@ -1996,6 +2021,18 @@ function lovr.load()
   pingText = ""
   pingDisplayTime = 0
 
+  --players last position before they stop moving and are on the ground
+  playerLastPosition = nil
+  playerOnGround = false
+  playerPositionLocked = false
+
+  -- Ground detection debug variables
+  groundDebug = {
+    distance = 0,
+    hits = 0,
+    slope = 0
+  }
+
   -- Inventory system
   inventory = {}
   selectedSlot = 1 -- Currently selected inventory slot (1-8)
@@ -2011,8 +2048,8 @@ function lovr.load()
 
   lovr.mouse.setRelativeMode(true)
   worldsettings = {
-    maxColliders = 1000000,
-    maxPenetration = 0
+    maxColliders = 16384,
+    maxPenetration = 0.0
 
   }
   -- Create physics world with traditional settings first (try simple approach)
@@ -2044,7 +2081,7 @@ function lovr.load()
   player:setFriction(1.0)       -- Maximum friction to reduce sliding
 
   -- Set additional collision properties to prevent phasing
-  player:setRestitution(0.6) -- Bouncy for fun physics
+  player:setRestitution(0) -- Bouncy for fun physics
 
   -- Set heavy mass and realistic inertia for better gravity response
   player:setMass(playerNPCMass)
@@ -2110,7 +2147,7 @@ function lovr.load()
   rockColliderDistance = 50 -- Only create colliders for rocks within this distance
 
   -- Generate rock positions (without colliders initially)
-  for i = 1, 5000 do -- Generate 5000 rocks across the map
+  for i = 1, 10000 do -- Generate 10000 rocks across the map
     local attempts = 0
     local rockX, rockZ
     local validPosition = false
@@ -2161,6 +2198,70 @@ function lovr.load()
   end
 
   print("Generated " .. #rocks .. " rock positions across the map")
+
+  -- ============================================================================
+  -- LIGHT POST SYSTEM - Street lights scattered around the map
+  -- ============================================================================
+
+  -- Function to generate light posts on top of rocks
+  function generateLightPosts()
+    lightPosts = {}
+
+    -- Place lights on top of rocks instead of in a grid pattern
+    local lightHeightAboveRock = 3 -- How many units above the rock to place the light
+    local rocksWithLights = 0
+
+    for _, rock in ipairs(rocks) do
+      -- Check if rock is far enough from houses (only if lightsOnAllRocks is false)
+      local validPosition = true
+
+      if not lightsOnAllRocks then
+        -- Only avoid placing lights on rocks too close to houses if lightsOnAllRocks is false
+        for _, house in ipairs(houses) do
+          local distance = math.sqrt((rock.x - house.x) ^ 2 + (rock.z - house.z) ^ 2)
+          if distance < (house.width / 2 + 5) then -- Need 5 units clearance from houses
+            validPosition = false
+            break
+          end
+        end
+      end
+
+      if validPosition then
+        -- Position light above the rock
+        -- rock.y is already positioned on terrain, so add height above that
+        local lightY = rock.y + lightHeightAboveRock + (rock.scale or 1) * 2 -- Account for rock scale
+
+        table.insert(lightPosts, {
+          x = rock.x,
+          y = lightY,
+          z = rock.z,
+          intensity = light_intensity * lightBrightness * (0.8 + lovr.math.random() * 0.4), -- Vary intensity
+          color = {
+            light_color[1] * (0.9 + lovr.math.random() * 0.2),
+            light_color[2] * (0.9 + lovr.math.random() * 0.2),
+            light_color[3] * (0.9 + lovr.math.random() * 0.2)
+          },
+          range = lightRange + lovr.math.random() * 10, -- Light range with some variation
+          rockIndex = _                                 -- Keep reference to which rock this light is on
+        })
+
+        rocksWithLights = rocksWithLights + 1
+
+        -- Limit total number of lights for performance
+        if #lightPosts >= maxLights then
+          break
+        end
+      end
+    end
+
+    local filterStatus = lightsOnAllRocks and "all rocks" or "rocks away from houses"
+    print("Generated " ..
+      #lightPosts ..
+      " light posts on " .. rocksWithLights .. " rocks (total rocks: " .. #rocks .. ", mode: " .. filterStatus .. ")")
+  end
+
+  -- Generate the light posts
+  generateLightPosts()
 
   -- ============================================================================
   -- NPC SYSTEM - Walking NPCs that avoid houses
@@ -2219,7 +2320,7 @@ function lovr.load()
       npcBody:setLinearDamping(1.0)  -- Reasonable damping for 70kg human
       npcBody:setAngularDamping(5.0) -- Prevent spinning but allow movement
       npcBody:setFriction(0.3)       -- Lower friction for easier movement
-      npcBody:setRestitution(0.6)    -- Bouncy for fun physics
+      npcBody:setRestitution(0)      -- Bouncy for fun physics
 
       -- Set heavy mass and realistic inertia for better gravity response (same as player)
       npcBody:setMass(playerNPCMass)
@@ -2255,19 +2356,8 @@ function lovr.load()
 end
 
 function lovr.update(dt)
-  -- Make light follow the player position for better shadow coverage
-  if gameState == "playing" and player then
-    local px, py, pz = player:getPosition()
-    -- Position light closer to horizon with larger orbit radius
-    light_pos.x = px + 4 * math.cos(lovr.timer.getTime() * 0.02) -- Larger orbit, slower movement
-    light_pos.y = py + 12                                        -- Much lower height (closer to horizon)
-    light_pos.z = pz + 4 * math.sin(lovr.timer.getTime() * 0.02) -- Larger orbit, slower movement
-  else
-    -- Fallback for menu states - use original positioning
-    local t = lovr.timer.getTime()
-    light_pos.x = 3 * math.cos(t * 0.4)
-    light_pos.z = 3 * math.sin(t * 0.4) + z
-  end
+  -- Remove the single orbiting light - it will be replaced with static light posts
+  -- (No longer updating light_pos here)
 
   -- Only update game physics when playing
   if gameState ~= "playing" then
@@ -2357,6 +2447,76 @@ function lovr.update(dt)
     end
   end
 
+  --use terrain height to check if player is on the ground
+  if player then
+    local playerX, playerY, playerZ = player:getPosition()
+    local groundThreshold = 0.53 -- Distance threshold for walking on terrain (realistic value)
+
+    -- Get actual terrain height at player position
+    local terrainHeight = getTerrainHeight(playerX, playerZ)
+    local groundDistance = playerY - terrainHeight
+
+    -- Clear debug data for this frame
+    groundDebug.allHits = {}
+    groundDebug.totalRayHits = 1 -- Always have terrain data
+    groundDebug.fallbackUsed = false
+
+    -- Store terrain-based ground info
+    groundDebug.distance = groundDistance
+    groundDebug.terrainHeight = terrainHeight
+    groundDebug.playerHeight = playerY
+    groundDebug.hits = 1    -- Always have terrain data
+    groundDebug.slope = 1.0 -- Assume walkable terrain
+
+    -- Player is on ground if within threshold of terrain
+    if groundDistance <= groundThreshold and groundDistance >= -1.0 then
+      playerOnGround = true
+    else
+      playerOnGround = false
+    end
+
+    -- Create fake hit data for debug display compatibility
+    if not groundDebug.allHits then groundDebug.allHits = {} end
+    table.insert(groundDebug.allHits, {
+      hitPos = { playerX, terrainHeight, playerZ },
+      debugPlayerY = playerY,
+      debugHitY = terrainHeight,
+      debugComparison = string.format("Terrain: %.2f dist (Player %.2f - Terrain %.2f)", groundDistance, playerY,
+        terrainHeight),
+      hitShapeType = "terrain_height",
+      isBelow = (terrainHeight < playerY + 1.0),
+      distance = groundDistance
+    })
+  end
+
+
+  -- Initialize playerLastPosition if it's nil
+  if player and playerLastPosition == nil then
+    local px, py, pz = player:getPosition()
+    playerLastPosition = { x = px, y = py, z = pz }
+  end
+
+  if playerOnGround == false or lovr.system.isKeyDown('w') == true or lovr.system.isKeyDown('s') == true or lovr.system.isKeyDown('d') == true or lovr.system.isKeyDown('a') == true or lovr.system.isKeyDown('space') == true or lovr.system.isKeyDown('lshift') == true or lovr.system.isKeyDown('rshift') == true then
+    local px, py, pz = player:getPosition()
+    playerLastPosition = { x = px, y = py, z = pz }
+    playerPositionLocked = false
+  end
+
+  if playerOnGround == true and lovr.system.isKeyDown('w') == false and lovr.system.isKeyDown('s') == false and lovr.system.isKeyDown('d') == false and lovr.system.isKeyDown('a') == false and lovr.system.isKeyDown('space') == false and lovr.system.isKeyDown('lshift') == false then
+    --locks the player in place
+    playerPositionLocked = true
+    player:setLinearVelocity(0, 0, 0)
+    --sets the player's position to the last position
+    if playerLastPosition then
+      player:setPosition(playerLastPosition.x, playerLastPosition.y, playerLastPosition.z)
+    end
+  end
+
+
+
+
+
+
 
 
   -- Get movement input
@@ -2434,27 +2594,29 @@ function lovr.update(dt)
 
   -- DEBUG: Check if player is falling through terrain
   local vx, vy, vz = player:getLinearVelocity()
-  if vy < -5 then -- If falling fast
-    print("WARNING: Player falling rapidly! Y velocity: " .. string.format("%.2f", vy) .. " at position (" ..
-      string.format("%.1f", playerX) ..
-      ", " .. string.format("%.1f", playerY) .. ", " .. string.format("%.1f", playerZ) .. ")")
+  -- If falling fast
 
-    -- Check if player has fallen below expected terrain
-    local expectedHeight = terrainHeightFunction(playerX, playerZ)
-    if playerY < expectedHeight - 5 then -- 5 units below expected terrain
-      print("CRITICAL: Player has fallen well below terrain! Expected: " .. string.format("%.2f", expectedHeight) ..
-        ", Actual: " .. string.format("%.2f", playerY))
 
-      -- Emergency respawn if player falls too far
-      if playerY < expectedHeight - 20 then
-        print("EMERGENCY RESPAWN: Moving player back to safe height")
-        local safeHeight = getSafeSpawnHeight(playerX, playerZ)
-        player:setPosition(playerX, safeHeight, playerZ)
-        player:setLinearVelocity(0, 0, 0)
-        player:setAngularVelocity(0, 0, 0)
-      end
-    end
+  -- Check if player has fallen below expected terrain
+  local expectedHeight = terrainHeightFunction(playerX, playerZ)
+  -- 5 units below expected terrain
+  if groundDebug.emergencyRespawn == nil then
+    groundDebug.emergencyRespawn = false
   end
+
+
+  -- Emergency respawn if player falls too far
+  if playerY < expectedHeight - 0.1 then
+    --writes to the ground debug table
+    groundDebug.emergencyRespawn = true
+    print("EMERGENCY RESPAWN: Moving player back to safe height")
+    local safeHeight = getSafeSpawnHeight(playerX, playerZ)
+    player:setPosition(playerX, safeHeight, playerZ)
+    player:setLinearVelocity(0, 0, 0)
+    player:setAngularVelocity(0, 0, 0)
+  end
+
+
 
   -- Update camera transform
   camera.transform:identity()
@@ -2472,7 +2634,7 @@ function lovr.update(dt)
 end
 
 function lovr.draw(pass)
-  lovr.graphics.setBackgroundColor(0.5, 0.8, 1.0) -- Light blue sky
+  lovr.graphics.setBackgroundColor(0, 0, 0) -- black sky
 
   if gameState == "menu" then
     -- Set up a basic camera for the menu
@@ -2503,38 +2665,65 @@ function lovr.draw(pass)
     return
   end
 
-  -- Debug: Print shadow parameters occasionally
-  if math.random() < 0.001 then -- 0.1% chance per frame
-    print("DEBUG: Using global shadow parameters for all objects - near:" ..
-      shadow_near_plane .. " far:" .. shadow_far_plane .. " radius:" .. shadow_radius)
-  end
-
-  -- Render shadow map for ALL objects using global parameters
-  render_shadow_map_with_params(render_scene, shadow_near_plane, shadow_far_plane, shadow_radius)
-
-  -- Set up main camera view with shadow shader
+  -- Set up main camera view with multi-light shader
   pass:push()
   pass:setViewPose(1, camera.transform)
 
-  -- Apply the shadow shader to the main pass
+  -- Apply the multi-light shader to the main pass
   pass:setShader(shader)
-  pass:setSampler(shadow_map_sampler)
-  pass:send('shadowMapTexture', shadow_map_texture)
-  pass:send('lightPos', light_pos)
-  pass:send('lightSpaceMatrix', light_space_matrix)
-  pass:send('lightOrthographic', light_orthographic)
-  pass:send('lightIntensity', light_intensity)
-  pass:send('lightColor', light_color)
 
-  -- Draw all objects with the house shadow parameters
+  -- Send light data to shader (only lights within render distance)
+  local playerX, playerY, playerZ = 0, 0, 0
+  if player then
+    playerX, playerY, playerZ = player:getPosition()
+  end
+
+  -- Find closest lights to the player for better performance
+  local nearbyLights = {}
+  for _, lightPost in ipairs(lightPosts) do
+    local distance = math.sqrt((lightPost.x - playerX) ^ 2 + (lightPost.z - playerZ) ^ 2)
+    if distance <= renderDistance then
+      table.insert(nearbyLights, { light = lightPost, distance = distance })
+    end
+  end
+
+  -- Sort by distance and take only the closest maxLights
+  table.sort(nearbyLights, function(a, b) return a.distance < b.distance end)
+
+  local lightsToSend = {}
+  for i = 1, math.min(#nearbyLights, maxLights) do
+    table.insert(lightsToSend, nearbyLights[i].light)
+  end
+
+  -- Send light data to shader
+  local lightPositions = {}
+  local lightColors = {}
+  local lightIntensities = {}
+  local lightRanges = {}
+
+  for i, lightPost in ipairs(lightsToSend) do
+    table.insert(lightPositions, { lightPost.x, lightPost.y, lightPost.z })
+    table.insert(lightColors, lightPost.color)
+    table.insert(lightIntensities, lightPost.intensity)
+    table.insert(lightRanges, lightPost.range)
+  end
+
+  pass:send('numLights', #lightsToSend)
+  if #lightsToSend > 0 then
+    pass:send('lightPositions', lightPositions)
+    pass:send('lightColors', lightColors)
+    pass:send('lightIntensities', lightIntensities)
+    pass:send('lightRanges', lightRanges)
+  end
+
+  -- Draw all objects with multiple light illumination
   render_scene(pass)
 
   -- Reset shader
   pass:setShader()
 
-  -- Draw light source indicator
-  pass:setColor(1, 1, 1, 1)
-  pass:sphere(light_pos, 1)
+  -- Draw light posts (instead of single light sphere)
+  render_light_posts(pass)
 
   -- Debug: Draw local player collider if debug is enabled
   if _G.showColliderDebug and player then
@@ -2621,18 +2810,8 @@ function lovr.draw(pass)
   -- Draw reticle at center of screen
   drawReticle(pass)
 
-  -- Also render to the lighting pass for debug purposes
-  -- Note: lighting pass uses the last computed light_space_matrix (from houses)
-  render_lighting_pass(render_scene)
-
-  -- Debug: show shadow map if enabled
-  if debug_show_shadow_map then
-    pass:setDepthWrite(false)
-    local width, height = lovr.system.getWindowDimensions()
-    pass:setViewport(0, 0, width / 4, height / 4)
-    pass:fill(shadow_map_texture)
-  end
-  return lovr.graphics.submit({ shadow_map_pass, lighting_pass, pass })
+  -- No longer need shadow passes - just submit the main pass
+  return lovr.graphics.submit(pass)
 end
 
 function drawMainMenu(pass)
@@ -2926,10 +3105,9 @@ function lovr.keypressed(key)
   elseif gameState == "playing" then
     -- Game controls
     if key == 'space' then
-      -- Jump - only if on ground (very low vertical velocity)
-      local vx, vy, vz = player:getLinearVelocity()
-      if math.abs(vy) < 0.1 then                         -- Much stricter check - must be nearly stationary vertically
-        player:applyLinearImpulse(0, playerJumpForce, 0) -- 4x higher jump (500 * 4 = 2000)
+      -- Jump - only if on ground (playerOnGround is true)
+      if playerOnGround then
+        player:applyLinearImpulse(0, playerJumpForce, 0)
       end
     elseif key == 'h' then
       -- Quick host game
@@ -3540,6 +3718,36 @@ function drawPlayerListHUD(pass)
     end
   end
   pass:text("Rock Colliders: " .. rockColliderCount, 0.02, -0.045, 0.01, 0.015)
+
+  -- Show lights rendered count
+  pass:text("Lights Rendered: " .. globalLightsRendered .. "/" .. #lightPosts, 0.02, -0.06, 0.01, 0.015)
+
+  pass:text("Player Position Locked: " .. tostring(playerPositionLocked), 0.02, -0.075, 0.01, 0.015)
+
+  pass:text("Player On Ground: " .. tostring(playerOnGround), 0.02, -0.09, 0.01, 0.015)
+  pass:text("Ground Distance: " .. string.format("%.2f", groundDebug.distance), 0.02, -0.105, 0.01, 0.015)
+  pass:text("Ground Hits: " .. groundDebug.hits .. " | Slope: " .. string.format("%.2f", groundDebug.slope), 0.02, -0.12,
+    0.01, 0.015)
+  local px, py, pz = player:getPosition()
+  pass:text("Player Position: " .. string.format("%.2f, %.2f, %.2f", px, py, pz), 0.02, -0.135, 0.01, 0.015)
+  pass:text("Terrain Height: " .. string.format("%.2f", groundDebug.terrainHeight or 0), 0.02, -0.15, 0.01, 0.015)
+
+  -- Show terrain-based debug info
+  if groundDebug.allHits and #groundDebug.allHits > 0 then
+    local firstHit = groundDebug.allHits[1]
+    pass:text("Detection Method: " .. (firstHit.hitShapeType or "unknown"), 0.02, -0.165, 0.01, 0.015)
+    pass:text("Distance Calc: " .. (firstHit.debugComparison or "N/A"), 0.02, -0.18, 0.01, 0.015)
+    pass:text(
+      "Player Y: " ..
+      string.format("%.2f", groundDebug.playerHeight or 0) ..
+      " | Terrain Y: " .. string.format("%.2f", groundDebug.terrainHeight or 0), 0.02, -0.195, 0.01, 0.015)
+    pass:text("Ground Valid: " .. tostring(firstHit.isBelow or false) .. " | Method: Direct Terrain Query", 0.02, -0.21,
+      0.01, 0.015)
+
+    -- Show final distance calculation
+    pass:text("Final Distance: " .. string.format("%.2f", groundDebug.distance or 999), 0.02, -0.225, 0.01, 0.015)
+    pass:text("Emergency Respawn: " .. tostring(groundDebug.emergencyRespawn), 0.02, -0.24, 0.01, 0.015)
+  end
 
 
 

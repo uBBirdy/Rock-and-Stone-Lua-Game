@@ -6,4 +6,5 @@ function lovr.conf(t)
     t.window.title = "Rock_and_Stone_Lua_Game"
     --t.window.icon = "icon.png"
     t.modules.headset = false
+    t.graphics.vsync = false
 end
